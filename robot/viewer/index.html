@@ -73,6 +73,11 @@
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.1.0/dist/blazeface.min.umd.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<!-- Optional, local-only, gitignored: sets window.GEMINI_API_KEY for
+     Gemini-assisted goal understanding. Copy config.local.example.js to
+     create it. A 404 here (no file) is expected and harmless -- the app
+     falls back to the regex-based goal parser when GEMINI_API_KEY is unset. -->
+<script src="config.local.js" onerror="console.log('%cNo config.local.js (see config.local.example.js) -- goal parsing uses the regex fallback.', 'color:#888')"></script>
 <script>
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1b1d21);
@@ -464,16 +469,42 @@ function stopRecognizer() {
   if (recognizer && recognizing) { try { recognizer.stop(); } catch (e) {} }
 }
 
-// Item 3 scope: prove the mic -> language -> speaker loop end-to-end with a
-// small set of canned intents plus a generic echo fallback. Items 4 and 5
-// (scene memory, goal-directed action) extend this same dispatcher rather
-// than replacing it.
-function handleUtterance(transcript) {
+// Gemini (image + transcript + memory) is tried first when a key is
+// configured -- see interpretUtteranceWithGemini() above. Everything below
+// this point is the original regex-based dispatcher, preserved verbatim as
+// the complete fallback: no key, offline, timeout, or a malformed response
+// all fall straight through to it, so behavior with no key configured is
+// byte-for-byte what it always was.
+async function handleUtterance(transcript) {
   showCaption(transcript, 'heard');
+
+  if (sequenceActive) {
+    setTimeout(() => speak("Hold on, I'm still looking!"), 700);
+    return;
+  }
+
+  if (window.GEMINI_API_KEY) {
+    const result = await interpretUtteranceWithGemini(transcript);
+    if (result) {
+      if (result.action && result.action.type === 'goal' && result.action.target) {
+        setTimeout(() => handleGoalCommand(result.action.target), 700);
+      } else if (result.action && result.action.type === 'remember') {
+        rememberFromGemini(result.action.label, result.action.details);
+        triggerLightPulse();
+        if (result.speak) setTimeout(() => speak(result.speak), 700);
+      } else if (result.speak) {
+        setTimeout(() => speak(result.speak), 700);
+      }
+      return;
+    }
+    // Gemini unavailable, timed out, or gave a malformed response -> fall
+    // through to the regex chain below exactly as if no key were set.
+  }
+
   const t = transcript.toLowerCase();
   let reply;
 
-  const goalMatch = t.match(/\b(?:look at|point (?:the light )?at|turn (?:to|towards)|find(?: me)?|show me) (?:the |a |an )?([a-z ]+?)\??$/);
+  const goalMatch = t.match(/\b(?:look at|point (?:the light )?(?:at|to)|turn (?:to|towards)|find(?: me)?|show me) (?:the |a |an )?([a-z ]+?)\??$/);
   const listMatch = /\bwhat (?:do|did) you see\b/.test(t) || /\bwhat have you seen\b/.test(t);
   const seenMatch = t.match(/\b(?:do|did) you (?:see|notice) (?:a |an |the )?([a-z ]+?)\??$/)
                   || t.match(/\bhave you seen (?:a |an |the )?([a-z ]+?)\??$/)
@@ -482,20 +513,15 @@ function handleUtterance(transcript) {
   const whereMatch = t.match(/\bwhere(?:'s| is| was)? (?:the |my |a |an )?([a-z ]+?)\??$/);
 
   if (goalMatch) {
-    if (sequenceActive) {
-      reply = "Hold on, I'm still looking!";
-    } else {
-      const rawName = goalMatch[1].trim();
-      setTimeout(() => handleGoalCommand(rawName), 700); // same beat as every other reply
-      reply = null; // the goal sequence speaks for itself at each step
-    }
+    const rawName = goalMatch[1].trim();
+    setTimeout(() => handleGoalCommand(rawName), 700); // same beat as every other reply
+    reply = null; // the goal sequence speaks for itself at each step
   } else if (listMatch) {
-    if (sceneMemory.size === 0) {
-      reply = "I haven't spotted anything yet — hold something up to the camera.";
-    } else {
-      const items = [...sceneMemory.values()].map((o) => (o.color ? `a ${o.color} ${o.label}` : `a ${o.label}`));
-      reply = `I've seen ${items.join(', ')}.`;
-    }
+    const items = [
+      ...[...sceneMemory.values()].map((o) => (o.color ? `a ${o.color} ${o.label}` : `a ${o.label}`)),
+      ...[...geminiMemory.values()].map((o) => o.label),
+    ];
+    reply = items.length ? `I've seen ${items.join(', ')}.` : "I haven't spotted anything yet — hold something up to the camera.";
   } else if (colorMatch) {
     const mem = sceneMemory.get(resolveObjectName(colorMatch[1].trim()));
     reply = mem && mem.color ? `The ${mem.label} looked ${mem.color} to me.` : `I haven't gotten a good look at that yet.`;
@@ -504,8 +530,9 @@ function handleUtterance(transcript) {
     const side = mem.nx < 0.4 ? 'over on the left' : mem.nx > 0.6 ? 'over on the right' : 'right in the middle';
     reply = `I last saw the ${mem.label} ${side} of frame.`;
   } else if (seenMatch) {
-    const mem = sceneMemory.get(resolveObjectName(seenMatch[1].trim()));
-    reply = mem ? `Yes — I saw a ${mem.color ? mem.color + ' ' : ''}${mem.label}.` : `No, I haven't seen a ${seenMatch[1].trim()}.`;
+    const rawSeen = seenMatch[1].trim();
+    const mem = sceneMemory.get(resolveObjectName(rawSeen)) || geminiMemory.get(rawSeen.toLowerCase());
+    reply = mem ? `Yes — I saw a ${mem.color ? mem.color + ' ' : ''}${mem.label}.` : `No, I haven't seen a ${rawSeen}.`;
   } else if (/\b(hi|hello|hey)\b/.test(t)) {
     reply = 'Hey! Good to see you.';
     triggerLightPulse();
@@ -715,13 +742,7 @@ function drawOverlay() {
     const isFacing = t.facing >= FACING_THRESHOLD;
     const baseColor = isFacing ? '74,222,128' : '251,191,36'; // green vs amber
     ctx.strokeStyle = alive ? `rgb(${baseColor})` : `rgba(${baseColor},0.35)`;
-    ctx.fillStyle = ctx.strokeStyle;
     ctx.strokeRect(t.x1, t.y1, t.w, t.h);
-    const label = `Person ${t.id}${isFacing ? '' : ' · looking away'}`;
-    const tw = ctx.measureText(label).width;
-    ctx.fillRect(t.x1, Math.max(0, t.y1 - 18), tw + 8, 18);
-    ctx.fillStyle = '#04140a';
-    ctx.fillText(label, t.x1 + 4, Math.max(12, t.y1 - 4));
   }
   for (const o of latestObjects) {
     const [x, y, w, h] = o.bbox;
@@ -907,52 +928,168 @@ function playSuccessJingle() {
   });
 }
 
-// Language + memory decide WHAT to do (the queue); updateGoalAction() above
-// just runs it. The middle "scan" step is the required re-observation: it
-// actively re-checks live detections rather than trusting stale memory.
-function handleGoalCommand(rawName) {
+// ---------------------------------------------------------------------------
+// Gemini is the primary conversational + vision brain whenever a key is
+// configured: ONE call per utterance gets the live camera frame, the full
+// transcript, and everything remembered so far, and decides both what to
+// SAY and whether an ACTION (goal-find or remember) is needed -- see
+// interpretUtteranceWithGemini() and handleUtterance() below. This
+// replaces COCO-SSD's fixed 80-class vocabulary as the thing deciding
+// "what is this" and "is it still there": COCO-SSD still runs continuously
+// for passive scene-memory logging (cheap, local, always-on), but when a
+// key is configured, Gemini's own live look is what goal confirmation and
+// "remember this" actually trust. The full regex-based dispatcher further
+// below is kept intact as the complete fallback -- no key, offline, or a
+// failed/malformed Gemini response all drop straight into it unchanged, so
+// the demo never hard-depends on the network.
+// ---------------------------------------------------------------------------
+const GEMINI_MODEL = 'gemini-flash-latest'; // Google's rolling alias for the current Flash model
+const KNOWN_TARGETS = [...new Set(Object.values(OBJECT_SYNONYMS))]; // hint vocabulary for "goal" actions; Gemini isn't restricted to it for "remember"
+
+const frameCaptureCanvas = document.createElement('canvas');
+const frameCaptureCtx = frameCaptureCanvas.getContext('2d');
+function captureFrameJPEG() {
+  if (!video.videoWidth) return null;
+  frameCaptureCanvas.width = video.videoWidth;
+  frameCaptureCanvas.height = video.videoHeight;
+  frameCaptureCtx.drawImage(video, 0, 0);
+  return frameCaptureCanvas.toDataURL('image/jpeg', 0.7).split(',')[1]; // strip the "data:...base64," prefix
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Explicitly-told memories, open-vocabulary (Gemini names whatever's in
+// frame, not limited to COCO-SSD's 80 classes) -- separate from the
+// passive auto-noticed sceneMemory below, since the two are populated by
+// different triggers (continuous detection vs. an explicit "remember
+// this"). Merged back together only when answering memory questions.
+const geminiMemory = new Map();
+function rememberFromGemini(label, details) {
+  const key = (label || '').toLowerCase().trim();
+  if (!key) return;
+  const now = performance.now();
+  const existing = geminiMemory.get(key);
+  if (existing) { existing.lastSeenAt = now; if (details) existing.details = details; }
+  else geminiMemory.set(key, { label, details: details || '', firstSeenAt: now, lastSeenAt: now });
+}
+function serializeMemoryForPrompt() {
+  const lines = [];
+  for (const o of sceneMemory.values()) lines.push(`- ${o.color ? o.color + ' ' : ''}${o.label} (auto-noticed by the local detector)`);
+  for (const o of geminiMemory.values()) lines.push(`- ${o.label}${o.details ? ': ' + o.details : ''} (explicitly asked to remember)`);
+  return lines.length ? lines.join('\n') : '(nothing remembered yet this session)';
+}
+
+async function callGemini(promptText, { maxOutputTokens = 150, timeoutMs = 7000 } = {}) {
+  if (!window.GEMINI_API_KEY) return null;
+  const frame = captureFrameJPEG();
+  if (!frame) return null;
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${window.GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: promptText }, { inline_data: { mime_type: 'image/jpeg', data: frame } }] }],
+          // thinkingBudget: 0 matters, not just as an optimization: the
+          // current Flash model reasons by default before answering, and
+          // without this a small maxOutputTokens (needed to keep a live
+          // demo responsive) gets consumed entirely by internal "thought"
+          // tokens, leaving none for the actual answer -- finishReason:
+          // MAX_TOKENS with empty content. Measured live: ~1.5-4s with
+          // thinking off vs. empty content every time with it left on.
+          generationConfig: { temperature: 0.2, maxOutputTokens, thinkingConfig: { thinkingBudget: 0 } },
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      }
+    );
+    if (!res.ok) throw new Error(`Gemini HTTP ${res.status}`);
+    const data = await res.json();
+    // Gemini can split one answer across multiple parts (observed live: a
+    // response arrived as two parts, the JSON cut mid-string at the
+    // boundary) -- concatenating all of them, not just parts[0], is what
+    // actually reassembles valid JSON. Taking parts[0] alone silently
+    // truncated the answer and failed to parse on every single call.
+    const text = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
+    const cleaned = text.trim().replace(/^```(json)?/i, '').replace(/```$/, '').trim();
+    return JSON.parse(cleaned);
+  } catch (err) {
+    console.warn('Gemini call failed, falling back:', err);
+    return null;
+  }
+}
+
+async function interpretUtteranceWithGemini(transcript) {
+  const prompt = `You are the conversational brain for a small robotic desk lamp character. It has one
+camera, a speaker, and a simple body that can turn to look at things and pulse its light. Keep spoken
+replies short and characterful -- a phrase to one sentence, not a lecture.
+
+Known object vocabulary for "goal" actions (the lamp's body can only search for these): ${KNOWN_TARGETS.join(', ')}.
+
+What's been remembered so far this session:
+${serializeMemoryForPrompt()}
+
+The person just said: "${transcript}"
+
+Using the attached live camera frame, reply with ONLY compact JSON, no markdown fences, exactly:
+{"speak": string, "action": null or {"type":"goal","target":string} or {"type":"remember","label":string,"details":string}}
+
+Rules:
+- action {"type":"remember",...}: ONLY when they explicitly ask you to remember/note/memorize/look at
+  something right now. "label" is a short 2-5 word name for what's in the frame; "details" is one
+  useful descriptive sentence (color, distinguishing features).
+- action {"type":"goal",...}: ONLY when they ask you to find/point at/locate/look toward something.
+  Prefer a "target" from the known vocabulary above when it fits.
+- Otherwise action is null -- just have a short, natural conversation, using the remembered list above
+  to answer questions about what you've seen.`;
+  const parsed = await callGemini(prompt, { maxOutputTokens: 250 });
+  return (parsed && typeof parsed.speak === 'string') ? parsed : null;
+}
+
+async function confirmVisibleWithGemini(target) {
+  const prompt = `Look at the attached camera frame. Is a "${target}" visible in it right now? Reply with
+ONLY compact JSON, no markdown fences: {"visible": boolean}`;
+  const parsed = await callGemini(prompt, { maxOutputTokens: 30, timeoutMs: 5000 });
+  return (parsed && typeof parsed.visible === 'boolean') ? parsed.visible : null;
+}
+
+// Vision + language decide WHAT to do; this just runs it. Fires the "look"
+// and "scan" visuals through the normal action-queue engine (unchanged),
+// but times its own progress with sleep() so it can await a real, fresh
+// Gemini vision check at the end -- the required re-observation before
+// completing the goal -- instead of polling COCO-SSD every frame.
+async function handleGoalCommand(rawName) {
   const key = resolveObjectName(rawName);
   const mem = sceneMemory.get(key);
-  const actions = [];
 
-  actions.push({ type: 'wait', duration: 0.55, onStart: () => speak(`Let me look for the ${rawName}.`) });
+  speak(`Let me look for the ${rawName}.`);
+  await sleep(550);
 
   if (mem) {
-    actions.push({
+    startSequence([{
       type: 'look',
       yaw: THREE.MathUtils.clamp((mem.nx - 0.5) * 1.8, -1.1, 1.1),
       pitch: THREE.MathUtils.clamp((mem.ny - 0.5) * 1.0 - 0.05, -0.8, 0.6),
       duration: 1.0,
-    });
+    }]);
+    await sleep(1000);
   }
 
-  let found = false;
-  actions.push({
-    type: 'scan',
-    duration: 3.5,
-    onStart: () => { found = false; },
-    checkDone: () => {
-      if (latestObjects.some((o) => o.class === key)) { found = true; return true; }
-      return false;
-    },
-  });
+  startSequence([{ type: 'scan', duration: 3.5 }]);
+  await sleep(3500);
 
-  actions.push({
-    type: 'wait',
-    duration: 0.6,
-    onStart: () => {
-      const stillThere = found || (sceneMemory.has(key) && performance.now() - sceneMemory.get(key).lastSeenAt < 1500);
-      if (stillThere) {
-        triggerLightPulse();
-        playSuccessJingle();
-        speak(`Found the ${key}!`);
-      } else {
-        speak(`I don't see a ${rawName} right now.`);
-      }
-    },
-  });
+  const geminiVerdict = await confirmVisibleWithGemini(rawName);
+  const stillThere = geminiVerdict !== null
+    ? geminiVerdict
+    : (latestObjects.some((o) => o.class === key) || (sceneMemory.has(key) && performance.now() - sceneMemory.get(key).lastSeenAt < 1500));
 
-  startSequence(actions);
+  if (stillThere) {
+    triggerLightPulse();
+    playSuccessJingle();
+    speak(`Found the ${rawName}!`);
+  } else {
+    speak(`I don't see a ${rawName} right now.`);
+  }
 }
 
 // ---------------------------------------------------------------------------

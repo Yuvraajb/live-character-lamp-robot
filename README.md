@@ -11,6 +11,36 @@ all running in a single browser tab, no server or API key required.
 **Live demo:** https://yuvraajbhatterstarterpack.vercel.app
 **Technical note:** [TECHNICAL_NOTE.pdf](TECHNICAL_NOTE.pdf) (architecture, protocol, measurements, known limitations — 2 pages)
 
+## Try it yourself
+
+Open the live demo above in **Chrome**, grant camera + mic access, click
+anywhere once to enable sound, then try these — no setup, no key needed:
+
+1. **Look at the camera.** It wakes up, turns to face you, and greets you
+   with one combined motion + light pulse + chime + spoken line.
+2. **Look away for a couple seconds.** It disengages to a drooping "asleep"
+   pose with a floating "Zzz".
+3. Say **"hi"**, **"how are you"**, or **"bye"** — small talk.
+4. **Hold up a common object** (mug, bottle, phone, book, laptop, keyboard,
+   mouse, remote, backpack, potted plant, chair, or wine glass) until a
+   caption says it noticed something, then ask:
+   - **"what do you see?"**
+   - **"what color is the `<object>`?"**
+   - **"where's the `<object>`?"**
+5. Say **"find the `<object>`"** / **"look at the `<object>`"** / **"point
+   at (or to) the `<object>`"** — it turns, actively scans the live camera
+   feed, and reports whether it found it.
+
+**Optional, local-only, not on the live demo:** an experimental layer swaps
+the rule-based language handling above for real Gemini vision+language
+reasoning — natural phrasing the rules above can't parse (e.g. *"hey, can
+you point towards that thing on my desk"*), and a genuinely open-vocabulary
+*"remember this, it's a chipped blue mug"* that isn't limited to the object
+list above. It needs your own free API key and is **not** deployed on the
+live demo (a client-side key can't be secured on a static site, and the
+free tier caps at 20 requests/day — see [TECHNICAL_NOTE.md](TECHNICAL_NOTE.md)
+§2 for exactly what's been confirmed working). Setup: below.
+
 ## Quick start
 
 The fastest path is the live demo link above — open it in **Google Chrome**,
@@ -73,21 +103,20 @@ caption ("No system TTS voice detected…") instead of failing silently —
 `sudo apt install espeak-ng` (step 2 above) fixes it. Captions are always
 shown regardless, so the interaction is followable either way.
 
-## Using it
+### Optional: enable the local Gemini layer
 
-1. Open the page, grant camera/mic access, click once anywhere to enable sound.
-2. Look at the camera. The lamp wakes up, turns to face you, and greets you
-   out loud with a light pulse and a little musical sting.
-3. Talk to it. A few things it understands:
-   - "hi" / "how are you" / "bye" — small talk
-   - Hold an object up to the camera, then ask **"what do you see?"**,
-     **"what color is the `<object>`?"**, or **"where's the `<object>`?"**
-   - **"look at the `<object>`"** / **"point at the `<object>`"** / **"find
-     the `<object>`"** — goal-directed: it turns, actively scans the live
-     camera feed, and reports whether it found it (COCO-SSD recognizes ~20
-     common object classes — mugs, bottles, phones, books, keyboards, etc.)
-4. Look away (or step out of frame) and it disengages back to an idle,
-   sleeping pose after about a second.
+```bash
+cp robot/viewer/config.local.example.js robot/viewer/config.local.js
+# edit config.local.js, paste in a free key from https://aistudio.google.com/apikey
+python3 -m http.server 8080   # (re)start serving from the repo root
+```
+
+Reload the page — that's it. `config.local.js` is gitignored, so your key
+never gets committed. Leave it unset (or delete the file) and everything
+above still works exactly the same via the regex/COCO-SSD path; this file
+purely upgrades the goal/remember handling described above. See
+[TECHNICAL_NOTE.md](TECHNICAL_NOTE.md) §2 and §5 for what this layer adds,
+what's confirmed working, and why it isn't in the live deployment.
 
 ## Dependencies
 
@@ -124,6 +153,7 @@ robot/
                                   distributing, see README note below)
   viewer/
     index.html                — the entire application (single file)
+    config.local.example.js   — template for the optional local Gemini key (copy to config.local.js)
 ```
 
 ## Known limitations
