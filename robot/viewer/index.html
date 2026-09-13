@@ -1,0 +1,1141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dummy 5-DOF Lamp Robot Viewer</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1b1d21; overflow: hidden; font-family: -apple-system, sans-serif; }
+  #cam-wrap {
+    position: fixed; right: 16px; bottom: 16px; width: 220px; height: 165px;
+    border-radius: 12px; overflow: hidden; background: #000;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.55); z-index: 20;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  #cam-video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+  #cam-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  #cam-state {
+    position: absolute; left: 6px; bottom: 6px; padding: 2px 7px; border-radius: 5px;
+    font-size: 10px; font-weight: 600; letter-spacing: 0.03em; color: #d8ffe8;
+    background: rgba(10,20,14,0.55); backdrop-filter: blur(2px);
+  }
+  #cam-msg {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #888; font-size: 11px; text-align: center; padding: 12px; box-sizing: border-box;
+  }
+  #sound-hint {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+    background: rgba(20,22,26,0.85); color: #e8e8ea; padding: 8px 16px;
+    border-radius: 20px; font-size: 13px; z-index: 30; cursor: pointer;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4); transition: opacity 0.3s ease;
+  }
+  #caption {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    max-width: 480px; text-align: center; padding: 9px 16px; border-radius: 10px;
+    background: rgba(20,22,26,0.82); color: #eee; font-size: 13px; line-height: 1.4;
+    opacity: 0; transition: opacity 0.4s ease; pointer-events: none; z-index: 25;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+  }
+  #zzz {
+    position: fixed; top: 0; left: 0; transform: translate(-50%, -100%);
+    opacity: 0; transition: opacity 0.6s ease; pointer-events: none; z-index: 22;
+    color: #b9c3d6; font-family: Georgia, 'Times New Roman', serif; font-weight: 700;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+  }
+  #zzz span {
+    display: inline-block;
+    animation: zzz-float 2.4s ease-in-out infinite;
+  }
+  #zzz span:nth-child(1) { font-size: 13px; opacity: 0.55; animation-delay: 0s; }
+  #zzz span:nth-child(2) { font-size: 17px; opacity: 0.75; animation-delay: 0.25s; margin-left: 2px; }
+  #zzz span:nth-child(3) { font-size: 21px; opacity: 0.95; animation-delay: 0.5s; margin-left: 2px; }
+  @keyframes zzz-float {
+    0%   { transform: translateY(2px); opacity: 0; }
+    15%  { opacity: 1; }
+    60%  { transform: translateY(-14px); opacity: 1; }
+    100% { transform: translateY(-24px); opacity: 0; }
+  }
+</style>
+</head>
+<body>
+<div id="sound-hint">🔊 click anywhere to enable sound</div>
+<div id="cam-wrap">
+  <video id="cam-video" autoplay muted playsinline></video>
+  <canvas id="cam-canvas"></canvas>
+  <div id="cam-msg">requesting camera…</div>
+  <div id="cam-state">IDLE</div>
+</div>
+<div id="caption"></div>
+<div id="zzz"><span>Z</span><span>Z</span><span>Z</span></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface@0.1.0/dist/blazeface.min.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<script>
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1b1d21);
+
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 20);
+// The shade/light face -X at rest (there's a 180° yaw baked into the
+// head_pitch_joint's URDF origin, so it's not simply +X as the file's
+// top-of-file coordinate comment might suggest) — confirmed by test
+// render, not by eye. base_yaw_joint target 0 corresponds to a centered
+// face in the webcam (nx=0.5), so sitting the render camera on the -X side
+// makes the lamp read as looking at the viewer whenever it's tracking
+// someone centered in frame.
+camera.position.set(-1.2, -0.5, 0.6);
+camera.up.set(0, 0, 1);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+document.body.appendChild(renderer.domElement);
+
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0.35);
+controls.update();
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x30302f, 0.9));
+const key = new THREE.DirectionalLight(0xffffff, 0.9);
+key.position.set(1.2, -0.8, 1.6);
+scene.add(key);
+const rim = new THREE.DirectionalLight(0x88aaff, 0.35);
+rim.position.set(-1, 1, 0.5);
+scene.add(rim);
+
+const grid = new THREE.GridHelper(1.2, 12, 0x444852, 0x2c2f36);
+grid.rotation.x = Math.PI / 2;
+scene.add(grid);
+
+// URDF materials (rgba -> hex)
+const matWhite  = new THREE.MeshStandardMaterial({ color: 0xf0f0f2, roughness: 0.55, metalness: 0.05 });
+const matChrome = new THREE.MeshStandardMaterial({ color: 0xa8adb5, roughness: 0.35, metalness: 0.35 });
+const matLight  = new THREE.MeshStandardMaterial({ color: 0xfff3c3, emissive: 0xfff3c3, emissiveIntensity: 0.12, transparent: true, opacity: 0.95 });
+const matBlack  = new THREE.MeshStandardMaterial({ color: 0x0f1214, roughness: 0.6 });
+
+function cyl(radius, length, material) {
+  // URDF cylinders are aligned along local Z; three.js CylinderGeometry is along Y.
+  const g = new THREE.CylinderGeometry(radius, radius, length, 24);
+  g.rotateX(Math.PI / 2);
+  return new THREE.Mesh(g, material);
+}
+function ball(radius, material) {
+  return new THREE.Mesh(new THREE.SphereGeometry(radius, 24, 16), material);
+}
+function frame(parent, xyz, rpy) {
+  const g = new THREE.Group();
+  g.position.set(xyz[0], xyz[1], xyz[2]);
+  g.rotation.set(rpy[0], rpy[1], rpy[2], 'XYZ');
+  parent.add(g);
+  return g;
+}
+function place(mesh, xyz, rpy) {
+  mesh.position.set(xyz[0], xyz[1], xyz[2]);
+  mesh.rotation.set(rpy[0], rpy[1], rpy[2], 'XYZ');
+  return mesh;
+}
+
+const PI = Math.PI;
+const root = new THREE.Group();
+scene.add(root);
+
+// base_link
+const baseLink = new THREE.Group();
+root.add(baseLink);
+baseLink.add(place(cyl(0.170, 0.060, matWhite), [0, 0, 0.030], [0, 0, 0]));
+
+// turntable_link via base_yaw_joint (axis z)
+const turntable = frame(baseLink, [0, 0, 0.060], [0, 0, 0]);
+const baseYaw = new THREE.Group();
+turntable.add(baseYaw);
+
+// lower_arm_link via shoulder_pitch_joint (axis y)
+const shoulderFrame = frame(baseYaw, [0, 0, 0.055], [0, 0, 0]);
+const shoulderPitch = new THREE.Group();
+shoulderFrame.add(shoulderPitch);
+const lowerArm = new THREE.Group();
+shoulderPitch.add(lowerArm);
+lowerArm.add(place(cyl(0.025, 0.290, matWhite), [0, 0, 0.145], [0, 0, 0]));
+lowerArm.add(place(cyl(0.053, 0.080, matChrome), [0, 0, 0], [PI/2, 0, 0]));
+lowerArm.add(place(cyl(0.035, 0.030, matChrome), [0, 0, 0.025], [0, 0, 0]));
+lowerArm.add(place(cyl(0.035, 0.030, matChrome), [0, 0, 0.265], [0, 0, 0]));
+
+// upper_arm_link via elbow_pitch_joint (axis y)
+const elbowFrame = frame(lowerArm, [0, 0, 0.290], [0, 0, 0]);
+const elbowPitch = new THREE.Group();
+elbowFrame.add(elbowPitch);
+const upperArm = new THREE.Group();
+elbowPitch.add(upperArm);
+upperArm.add(place(cyl(0.024, 0.250, matWhite), [0, 0, 0.125], [0, 0, 0]));
+upperArm.add(place(cyl(0.050, 0.076, matChrome), [0, 0, 0], [PI/2, 0, 0]));
+upperArm.add(place(cyl(0.033, 0.028, matChrome), [0, 0, 0.023], [0, 0, 0]));
+upperArm.add(place(cyl(0.033, 0.028, matChrome), [0, 0, 0.227], [0, 0, 0]));
+
+// neck_link via neck_yaw_joint (axis z)
+const neckFrame = frame(upperArm, [0, 0, 0.250], [0, 0, 0]);
+const neckYaw = new THREE.Group();
+neckFrame.add(neckYaw);
+const neck = new THREE.Group();
+neckYaw.add(neck);
+neck.add(place(cyl(0.043, 0.070, matChrome), [0, 0, 0.035], [0, 0, 0]));
+
+// head_gimbal_link via head_pitch_joint (axis y), origin rpy has extra yaw of PI
+const headFrame = frame(neck, [0, 0, 0.070], [0, 0, PI]);
+const headPitch = new THREE.Group();
+headFrame.add(headPitch);
+const headGimbal = new THREE.Group();
+headPitch.add(headGimbal);
+headGimbal.add(place(cyl(0.027, 0.070, matChrome), [0.035, 0, 0], [0, PI/2, 0]));
+headGimbal.add(place(ball(0.046, matChrome), [0, 0, 0], [0, 0, 0]));
+
+// lamp_head_link (fixed) — this group also carries the squash/stretch pulse
+const lampHead = frame(headGimbal, [0.070, 0, 0], [0, 0, 0]);
+lampHead.add(place(cyl(0.090, 0.006, matLight), [0.108, 0, 0], [0, PI/2, 0]));
+
+// light_emitter_link (fixed)
+const lightEmitter = frame(lampHead, [0.113, 0, 0], [0, 0, 0]);
+lightEmitter.add(ball(0.030, matLight));
+const lampBulb = new THREE.PointLight(0xfff2c2, 0.3, 1.2, 2);
+lightEmitter.add(lampBulb);
+
+// camera_link (fixed)
+const cameraLink = frame(lampHead, [0.050, 0, -0.090], [0, 0, 0]);
+cameraLink.add(place(cyl(0.012, 0.018, matBlack), [0, 0, 0], [0, PI/2, 0]));
+
+// lamp_shade.stl mesh, loaded async into lampHead at identity origin
+const loader = new THREE.STLLoader();
+loader.load('../assets/lamp_shade.stl', (geometry) => {
+  geometry.computeVertexNormals();
+  const mesh = new THREE.Mesh(geometry, matWhite);
+  lampHead.add(mesh);
+});
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------------------------------------------------------------------------
+// Pixar-style motion: critically/under-damped springs per joint instead of
+// linear lerps. Underdamped -> natural overshoot + settle ("ease in/out").
+// Different stiffness/damping per joint -> follow-through / overlapping
+// action (the arm and neck lag a beat behind the head's primary motion).
+// ---------------------------------------------------------------------------
+class Spring {
+  constructor(stiffness, damping, value = 0) {
+    this.stiffness = stiffness; this.damping = damping;
+    this.value = value; this.vel = 0; this.target = value;
+  }
+  update(dt) {
+    const acc = this.stiffness * (this.target - this.value) - this.damping * this.vel;
+    this.vel += acc * dt;
+    this.value += this.vel * dt;
+  }
+}
+
+// Lower stiffness than an earlier pass — same underdamped overshoot
+// character (damping ratio ~0.42-0.6 across the chain), but roughly half
+// the natural frequency, so the whole assembly reads as weighty/floaty
+// rather than snappy. Pixar timing favors fewer, slower, bigger moves.
+const baseYawSpring     = new Spring(16, 3.4);    // primary orientation
+const headPitchSpring   = new Spring(14, 3.1);    // primary look
+const neckYawSpring     = new Spring(9, 3.0);     // secondary — trails the base, adds head "tilt" flair
+const shoulderSpring    = new Spring(8, 3.1);     // lean-in posture — slower, follows after
+const elbowSpring       = new Spring(7, 3.2, -0.30); // rest curl — slowest, follow-through tail
+
+let squashElapsed = Infinity;   // Infinity = inactive
+let squashMag = 0;
+
+function triggerSquash(mag) {
+  squashElapsed = 0;
+  squashMag = mag;
+}
+
+const lightSpring = new Spring(9, 6.5, 0.12); // idle glow -> attentive glow, no overshoot (critically damped)
+let pulseStart = -Infinity;
+
+function triggerLightPulse() {
+  pulseStart = performance.now();
+}
+
+// ---------------------------------------------------------------------------
+// Lamp-voice audio visualizer. speechSynthesis never hands us a real PCM
+// buffer to analyze (it's the OS TTS engine, not something we can route
+// through an AnalyserNode), so there's no true waveform to read. Instead
+// each SpeechSynthesisUtterance fires a real-timed 'word' boundary event as
+// it speaks — we treat each one as an impulse and let it decay fast, which
+// reads as the light "talking" in sync with actual word timing even though
+// the pulse shape itself is synthetic rather than a measured amplitude.
+// ---------------------------------------------------------------------------
+let voicePulseStart = -Infinity;
+let voicePulseMag = 0;
+const VOICE_PULSE_DECAY = 9;     // 1/s — how fast a single word's flash fades
+const VOICE_PULSE_WINDOW = 0.4;  // s — ignore pulses older than this
+
+function triggerVoicePulse(charLength) {
+  voicePulseStart = performance.now();
+  // Longer words land a slightly bigger flash; clamped so short/long words
+  // both read clearly without one spiking the light to white.
+  voicePulseMag = THREE.MathUtils.clamp(0.35 + (charLength || 4) * 0.025, 0.35, 0.75);
+}
+
+const voiceColorCool = new THREE.Color(0xfff3c3); // resting shade color (matches matLight's base)
+const voiceColorHot  = new THREE.Color(0xffffff); // brighter/whiter — "loud" word peak
+const scratchColor   = new THREE.Color();
+
+// ---------------------------------------------------------------------------
+// Audio: voice (speech synthesis) + a procedurally synthesized chime.
+// Nothing is a pre-recorded asset, so there's no licensing/network cost —
+// everything is generated at runtime with the Web Audio API.
+//
+// Browsers refuse to play any audio (Web Audio *and* speech synthesis)
+// before a real user gesture, so a one-time "click anywhere" hint arms
+// both the AudioContext and speechSynthesis on first click/keydown.
+// ---------------------------------------------------------------------------
+const soundHint = document.getElementById('sound-hint');
+let soundEnabled = false;
+let audioCtx = null;
+
+// Ambient fluorescent hum: a real recorded loop, not a synthesized SFX like
+// the chimes/jingles. Its volume just tracks lightSpring.value each frame
+// (see the animate loop below) — no separate on/off state, so it fades in
+// as the lamp wakes and back out as it dims toward sleep automatically,
+// staying in lockstep with however bright the shade currently is.
+const LAMP_HUM_MAX_VOLUME = 0.32;
+const lampHum = new Audio('../assets/freesound_community-fluorescent-lamp-with-broken-ignitor-16995.mp3');
+lampHum.loop = true;
+lampHum.volume = 0;
+
+// A clean Ubuntu image commonly ships zero speechSynthesis voices (Chrome on
+// Linux relies on speech-dispatcher/espeak-ng, which apt does not install by
+// default) — speak() then runs silently with no error. Rather than fail
+// quietly, surface it once as a caption so the loop is still legible; README
+// has the one-line apt fix. getVoices() often only populates after the async
+// 'voiceschanged' event, so we check on that event AND on a timeout fallback
+// for engines that never fire it.
+let ttsVoiceWarningShown = false;
+function announceIfNoVoices() {
+  if (ttsVoiceWarningShown || !soundEnabled) return;
+  if (speechSynthesis.getVoices().length === 0) {
+    ttsVoiceWarningShown = true;
+    showCaption('No system TTS voice detected — replies will show as captions only (see README).', 'said');
+  }
+}
+
+function enableSound() {
+  if (soundEnabled) return;
+  soundEnabled = true;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  audioCtx.resume();
+  // Silent warm-up utterance — some engines need one "primed" speak() call
+  // before voices are available.
+  const warm = new SpeechSynthesisUtterance('');
+  warm.volume = 0;
+  speechSynthesis.speak(warm);
+  soundHint.style.opacity = '0';
+  setTimeout(() => { soundHint.style.display = 'none'; }, 320);
+  if (speechSynthesis.onvoiceschanged !== undefined) {
+    speechSynthesis.addEventListener('voiceschanged', announceIfNoVoices, { once: true });
+  }
+  setTimeout(announceIfNoVoices, 900);
+  initRecognizer();
+  lampHum.play().catch(() => {}); // starts at volume 0; the animate loop fades it in
+}
+window.addEventListener('click', enableSound, { once: true });
+window.addEventListener('keydown', enableSound, { once: true });
+
+// Laptop speakers physically leak into the laptop mic (no hardware echo
+// cancellation to rely on), so pausing the recognizer isn't enough on its
+// own — anything we play also pushes this guard out, and onresult drops
+// any transcript that lands inside the guard window as likely self-echo.
+let micGuardUntil = -Infinity;
+function guardMicFor(ms) {
+  micGuardUntil = Math.max(micGuardUntil, performance.now() + ms);
+}
+
+const captionEl = document.getElementById('caption');
+function showCaption(text, who) {
+  captionEl.textContent = (who === 'heard' ? '🎤 ' : '💬 ') + text;
+  captionEl.style.borderLeft = who === 'heard' ? '3px solid #4ade80' : '3px solid #f5d76e';
+  captionEl.style.opacity = '1';
+  clearTimeout(showCaption._t);
+  showCaption._t = setTimeout(() => { captionEl.style.opacity = '0'; }, 4500);
+}
+
+// Shared voice-out path for both greetings and conversational replies.
+// Recognition is stopped *before* audio starts (not reactively on the
+// utterance's own onstart, which fires with just enough lag to let the
+// first word or two leak into the mic), and only resumes ~600ms after the
+// audio actually ends, giving room echo time to decay before we listen
+// again.
+function speak(text) {
+  if (!soundEnabled) return;
+  showCaption(text, 'said');
+  if (recognizing) { try { recognizer.stop(); } catch (e) {} }
+  const utter = new SpeechSynthesisUtterance(text);
+  utter.pitch = 1.35;
+  utter.rate = 1.1;
+  guardMicFor(utter.text.length * 60 + 800); // rough speak-time estimate + tail buffer
+  utter.onboundary = (e) => {
+    if (e.name === 'word' || e.name === undefined) triggerVoicePulse(e.charLength);
+  };
+  utter.onend = () => {
+    voicePulseStart = -Infinity;
+    guardMicFor(600);
+    if (wantListening) setTimeout(startRecognizer, 600);
+  };
+  speechSynthesis.cancel();
+  voicePulseStart = -Infinity;
+  speechSynthesis.speak(utter);
+}
+
+const GREETINGS = ['Oh, hi there!', 'Hi!', 'Oh — hello!', 'Hey, I see you!'];
+let lastGreetAt = -Infinity;
+const GREET_COOLDOWN_MS = 12000;
+
+function speakGreeting() {
+  const now = performance.now();
+  if (now - lastGreetAt < GREET_COOLDOWN_MS) return false;
+  lastGreetAt = now;
+  speak(GREETINGS[Math.floor(Math.random() * GREETINGS.length)]);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Spoken interaction: mic in via Web SpeechRecognition, voice out via the
+// shared speak() above. Listening is gated to the ENGAGED state (wired in
+// onEngage/onDisengage below) — the lamp only listens while it's actually
+// paying attention to you, which doubles as a sensible privacy default and
+// avoids transcribing unrelated room conversation.
+//
+// Deployment caveat worth flagging: Chrome's SpeechRecognition streams audio
+// to Google's cloud speech service — a real data/privacy tradeoff, noted
+// here rather than hidden. It also requires an embedded Google API key that
+// stock open-source Chromium (the default on Ubuntu via apt) does not ship
+// with — actual Google Chrome (or Chromium built with the key) is required
+// on the target deployment for this feature to function at all.
+// ---------------------------------------------------------------------------
+const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognizer = null;
+let recognizing = false;
+let wantListening = false;
+
+function initRecognizer() {
+  if (recognizer || !SpeechRecognitionImpl) return;
+  recognizer = new SpeechRecognitionImpl();
+  recognizer.continuous = true;
+  recognizer.interimResults = false;
+  recognizer.lang = 'en-US';
+  recognizer.onresult = (event) => {
+    const last = event.results[event.results.length - 1];
+    if (!last.isFinal) return;
+    if (speechSynthesis.speaking || performance.now() < micGuardUntil) return; // likely self-echo
+    const transcript = last[0].transcript.trim();
+    if (transcript) handleUtterance(transcript);
+  };
+  recognizer.onerror = (e) => { console.warn('speech recognition error:', e.error); };
+  recognizer.onend = () => {
+    recognizing = false;
+    // Chrome often ends "continuous" sessions on its own after a pause —
+    // restart transparently if we're still supposed to be listening.
+    if (wantListening) startRecognizer();
+  };
+}
+function startRecognizer() {
+  if (!recognizer || recognizing) return;
+  try { recognizer.start(); recognizing = true; } catch (e) { /* already starting */ }
+}
+function stopRecognizer() {
+  wantListening = false;
+  if (recognizer && recognizing) { try { recognizer.stop(); } catch (e) {} }
+}
+
+// Item 3 scope: prove the mic -> language -> speaker loop end-to-end with a
+// small set of canned intents plus a generic echo fallback. Items 4 and 5
+// (scene memory, goal-directed action) extend this same dispatcher rather
+// than replacing it.
+function handleUtterance(transcript) {
+  showCaption(transcript, 'heard');
+  const t = transcript.toLowerCase();
+  let reply;
+
+  const goalMatch = t.match(/\b(?:look at|point (?:the light )?at|turn (?:to|towards)|find(?: me)?|show me) (?:the |a |an )?([a-z ]+?)\??$/);
+  const listMatch = /\bwhat (?:do|did) you see\b/.test(t) || /\bwhat have you seen\b/.test(t);
+  const seenMatch = t.match(/\b(?:do|did) you (?:see|notice) (?:a |an |the )?([a-z ]+?)\??$/)
+                  || t.match(/\bhave you seen (?:a |an |the )?([a-z ]+?)\??$/)
+                  || t.match(/\bis there (?:a |an |the )?([a-z ]+?)\??$/);
+  const colorMatch = t.match(/\bwhat colou?r (?:is|was) (?:the |my |a |an )?([a-z ]+?)\??$/);
+  const whereMatch = t.match(/\bwhere(?:'s| is| was)? (?:the |my |a |an )?([a-z ]+?)\??$/);
+
+  if (goalMatch) {
+    if (sequenceActive) {
+      reply = "Hold on, I'm still looking!";
+    } else {
+      const rawName = goalMatch[1].trim();
+      setTimeout(() => handleGoalCommand(rawName), 700); // same beat as every other reply
+      reply = null; // the goal sequence speaks for itself at each step
+    }
+  } else if (listMatch) {
+    if (sceneMemory.size === 0) {
+      reply = "I haven't spotted anything yet — hold something up to the camera.";
+    } else {
+      const items = [...sceneMemory.values()].map((o) => (o.color ? `a ${o.color} ${o.label}` : `a ${o.label}`));
+      reply = `I've seen ${items.join(', ')}.`;
+    }
+  } else if (colorMatch) {
+    const mem = sceneMemory.get(resolveObjectName(colorMatch[1].trim()));
+    reply = mem && mem.color ? `The ${mem.label} looked ${mem.color} to me.` : `I haven't gotten a good look at that yet.`;
+  } else if (whereMatch && sceneMemory.get(resolveObjectName(whereMatch[1].trim()))) {
+    const mem = sceneMemory.get(resolveObjectName(whereMatch[1].trim()));
+    const side = mem.nx < 0.4 ? 'over on the left' : mem.nx > 0.6 ? 'over on the right' : 'right in the middle';
+    reply = `I last saw the ${mem.label} ${side} of frame.`;
+  } else if (seenMatch) {
+    const mem = sceneMemory.get(resolveObjectName(seenMatch[1].trim()));
+    reply = mem ? `Yes — I saw a ${mem.color ? mem.color + ' ' : ''}${mem.label}.` : `No, I haven't seen a ${seenMatch[1].trim()}.`;
+  } else if (/\b(hi|hello|hey)\b/.test(t)) {
+    reply = 'Hey! Good to see you.';
+    triggerLightPulse();
+  } else if (/how are you/.test(t)) {
+    reply = "I'm just a lamp, but I'm feeling bright today!";
+  } else if (/\b(bye|goodbye)\b/.test(t)) {
+    reply = 'See you later!';
+  } else {
+    reply = `I heard you say: ${transcript}`;
+  }
+  if (reply) setTimeout(() => speak(reply), 700); // beat to let the "heard" caption actually be readable
+}
+
+// ---------------------------------------------------------------------------
+// Camera + face detection ("looking toward the character" proxy). BlazeFace
+// only fires on a visible frontal-ish face, which is a much better proxy for
+// *attention* than generic person/body detection — someone turned away or
+// out of frame naturally stops registering, which is exactly the
+// "disengages when attention moves elsewhere" behavior we want, with no
+// extra logic needed.
+// ---------------------------------------------------------------------------
+const video = document.getElementById('cam-video');
+const canvas = document.getElementById('cam-canvas');
+const ctx = canvas.getContext('2d');
+const camMsg = document.getElementById('cam-msg');
+const camStateEl = document.getElementById('cam-state');
+const zzzEl = document.getElementById('zzz');
+const zzzWorldPos = new THREE.Vector3();
+
+let faceModel = null;
+let tracks = [];
+let nextTrackId = 1;
+let latestPrimary = null; // {cx, cy} normalized 0..1, largest/closest face
+
+async function initCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 }, audio: false });
+    video.srcObject = stream;
+    await new Promise((resolve) => { video.onloadedmetadata = resolve; });
+    await video.play();
+    canvas.width = video.videoWidth || 320;
+    canvas.height = video.videoHeight || 240;
+    camMsg.textContent = 'loading face model…';
+  } catch (err) {
+    camMsg.textContent = 'camera unavailable: ' + err.message;
+    console.warn('camera init failed', err);
+  }
+}
+
+let objectModel = null;
+let latestObjects = [];
+
+async function initModel() {
+  try {
+    camMsg.textContent = 'loading face model…';
+    faceModel = await blazeface.load();
+    window.__faceModel = faceModel; // inspectable from devtools console
+    camMsg.style.display = 'none';
+    console.log('blazeface loaded ok, backend =', tf.getBackend());
+  } catch (err) {
+    camMsg.textContent = 'face model failed: ' + err.message;
+    console.error('face model failed to load', err);
+  }
+}
+
+async function initObjectModel() {
+  try {
+    objectModel = await cocoSsd.load({ base: 'lite_mobilenet_v2' }); // small CPU-friendly backbone
+    console.log('coco-ssd loaded ok');
+  } catch (err) {
+    console.error('object model failed to load', err);
+  }
+}
+
+// Offscreen canvas used only to sample average color inside an object's
+// bounding box — cheap since crops are small and it only runs on the
+// (slower) object-detection cadence, not every render frame.
+const sampleCanvas = document.createElement('canvas');
+const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+function sampleAverageColor(x, y, w, h) {
+  sampleCanvas.width = video.videoWidth;
+  sampleCanvas.height = video.videoHeight;
+  sampleCtx.drawImage(video, 0, 0);
+  const sx = Math.max(0, Math.floor(x + w * 0.25));
+  const sy = Math.max(0, Math.floor(y + h * 0.25));
+  const sw = Math.max(1, Math.min(Math.floor(w * 0.5), sampleCanvas.width - sx));
+  const sh = Math.max(1, Math.min(Math.floor(h * 0.5), sampleCanvas.height - sy));
+  const data = sampleCtx.getImageData(sx, sy, sw, sh).data;
+  let r = 0, g = 0, b = 0, n = 0;
+  for (let i = 0; i < data.length; i += 4) { r += data[i]; g += data[i + 1]; b += data[i + 2]; n++; }
+  return { r: r / n, g: g / n, b: b / n };
+}
+function nameColor({ r, g, b }) {
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2 / 255;
+  if (max - min < 18) return l > 0.82 ? 'white' : l < 0.18 ? 'black' : 'gray';
+  let h;
+  if (max === r) h = ((g - b) / (max - min)) % 6;
+  else if (max === g) h = (b - r) / (max - min) + 2;
+  else h = (r - g) / (max - min) + 4;
+  h = Math.round(h * 60); if (h < 0) h += 360;
+  if (h < 15 || h >= 345) return 'red';
+  if (h < 45) return 'orange';
+  if (h < 70) return 'yellow';
+  if (h < 170) return 'green';
+  if (h < 200) return 'cyan';
+  if (h < 260) return 'blue';
+  if (h < 300) return 'purple';
+  return 'pink';
+}
+
+// ---------------------------------------------------------------------------
+// Scene memory: persists for the life of the page (not reset on
+// disengage/re-engage) so a question can be answered well after the object
+// was actually seen, per the "later answers a spoken question" requirement.
+// Keyed by COCO-SSD class name so repeated sightings update one entry
+// rather than piling up duplicates.
+// ---------------------------------------------------------------------------
+const sceneMemory = new Map();
+function rememberObject(det, colorName, now) {
+  const key = det.class;
+  const [x, y, w, h] = det.bbox;
+  const nx = (x + w / 2) / canvas.width;
+  const ny = (y + h / 2) / canvas.height;
+  const existing = sceneMemory.get(key);
+  if (existing) {
+    Object.assign(existing, { lastSeenAt: now, nx, ny });
+    existing.seenCount++;
+    if (colorName) existing.color = colorName;
+  } else {
+    sceneMemory.set(key, { label: key, color: colorName, firstSeenAt: now, lastSeenAt: now, seenCount: 1, nx, ny });
+    triggerLightPulse();
+    showCaption(`noticed a ${colorName ? colorName + ' ' : ''}${key}`, 'noted');
+  }
+}
+
+const OBJECT_SYNONYMS = {
+  mug: 'cup', cup: 'cup', glass: 'wine glass',
+  phone: 'cell phone', mobile: 'cell phone', smartphone: 'cell phone',
+  laptop: 'laptop', computer: 'laptop', notebook: 'laptop',
+  bottle: 'bottle', water: 'bottle',
+  book: 'book', bag: 'backpack', backpack: 'backpack',
+  remote: 'remote', controller: 'remote', keyboard: 'keyboard', mouse: 'mouse',
+  clock: 'clock', tv: 'tv', television: 'tv', monitor: 'tv', screen: 'tv',
+  plant: 'potted plant', chair: 'chair',
+};
+function resolveObjectName(word) {
+  if (OBJECT_SYNONYMS[word]) return OBJECT_SYNONYMS[word];
+  // Compound noun phrases ("water bottle", "coffee mug", "office chair")
+  // won't match a COCO class or the map above as a whole phrase — English
+  // compounds are head-final, so retry on just the last word before giving
+  // up. Not general NLP, just enough to cover the common spoken pattern.
+  const lastWord = word.split(' ').pop();
+  if (OBJECT_SYNONYMS[lastWord]) return OBJECT_SYNONYMS[lastWord];
+  return word;
+}
+
+// Head-orientation heuristic from BlazeFace's free landmarks (no extra
+// model): landmarks are [rightEye, leftEye, nose, mouth, rightEar, leftEar].
+// When a face points at the camera the nose sits centered between the eyes;
+// turning the head skews the nose toward one eye. This is head pose, not
+// true eye/iris gaze — a person could hold their head still and look away
+// with just their eyes and this wouldn't catch it. True gaze would need a
+// heavier iris-landmark model (e.g. MediaPipe FaceMesh with iris
+// refinement); this is the cheap version, upgradeable later if it isn't
+// convincing enough in practice.
+function facingScore(landmarks) {
+  if (!landmarks || landmarks.length < 3) return 1; // no landmarks -> assume facing
+  const [eye0, eye1, nose] = landmarks;
+  const eyeMidX = (eye0[0] + eye1[0]) / 2;
+  const eyeDist = Math.abs(eye1[0] - eye0[0]) || 1;
+  const noseOffset = (nose[0] - eyeMidX) / eyeDist;
+  return Math.max(0, 1 - Math.abs(noseOffset) * 2.2);
+}
+const FACING_THRESHOLD = 0.45;
+
+function updateTracks(faces, now) {
+  const dets = faces.map((f) => {
+    const [x1, y1] = f.topLeft;
+    const [x2, y2] = f.bottomRight;
+    return {
+      x1, y1, x2, y2, w: x2 - x1, h: y2 - y1, cx: (x1 + x2) / 2, cy: (y1 + y2) / 2,
+      facing: facingScore(f.landmarks),
+    };
+  });
+  const used = new Set();
+  for (const det of dets) {
+    let best = null, bestDist = Infinity;
+    for (const t of tracks) {
+      if (used.has(t)) continue;
+      const d = Math.hypot(t.cx - det.cx, t.cy - det.cy);
+      if (d < bestDist && d < Math.max(det.w, det.h) * 1.5) { bestDist = d; best = t; }
+    }
+    if (best) { Object.assign(best, det); best.lastSeen = now; used.add(best); }
+    else { tracks.push({ id: nextTrackId++, ...det, lastSeen: now }); used.add(tracks[tracks.length - 1]); }
+  }
+  tracks = tracks.filter((t) => now - t.lastSeen < 1200);
+  return tracks;
+}
+
+function drawOverlay() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.lineWidth = 2;
+  ctx.font = '13px -apple-system, sans-serif';
+  for (const t of tracks) {
+    const alive = performance.now() - t.lastSeen < 300;
+    const isFacing = t.facing >= FACING_THRESHOLD;
+    const baseColor = isFacing ? '74,222,128' : '251,191,36'; // green vs amber
+    ctx.strokeStyle = alive ? `rgb(${baseColor})` : `rgba(${baseColor},0.35)`;
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.strokeRect(t.x1, t.y1, t.w, t.h);
+    const label = `Person ${t.id}${isFacing ? '' : ' · looking away'}`;
+    const tw = ctx.measureText(label).width;
+    ctx.fillRect(t.x1, Math.max(0, t.y1 - 18), tw + 8, 18);
+    ctx.fillStyle = '#04140a';
+    ctx.fillText(label, t.x1 + 4, Math.max(12, t.y1 - 4));
+  }
+  for (const o of latestObjects) {
+    const [x, y, w, h] = o.bbox;
+    ctx.strokeStyle = '#fbbf24';
+    ctx.fillStyle = '#fbbf24';
+    ctx.strokeRect(x, y, w, h);
+    const label = o.colorName ? `${o.class} · ${o.colorName}` : o.class;
+    const tw = ctx.measureText(label).width;
+    ctx.fillRect(x, Math.max(0, y - 18), tw + 8, 18);
+    ctx.fillStyle = '#241b03';
+    ctx.fillText(label, x + 4, Math.max(12, y - 4));
+  }
+}
+
+async function detectLoop() {
+  if (faceModel && video.readyState >= 2 && video.videoWidth > 0) {
+    try {
+      const faces = await faceModel.estimateFaces(video, false);
+      updateTracks(faces, performance.now());
+      drawOverlay();
+      // Engagement is driven only by faces actually oriented toward the
+      // camera — a face that's present but turned away (talking to someone
+      // else, looking at something in the room) doesn't count as attention,
+      // so it correctly lets the disengage grace timer run out even though
+      // a face is technically still in frame.
+      const facingTracks = tracks.filter((t) => t.facing >= FACING_THRESHOLD);
+      latestPrimary = facingTracks.length
+        ? facingTracks.reduce((a, b) => (a.w * a.h > b.w * b.h ? a : b))
+        : null;
+      if (latestPrimary) {
+        latestPrimary = {
+          nx: latestPrimary.cx / canvas.width,
+          ny: latestPrimary.cy / canvas.height,
+        };
+      }
+    } catch (err) { console.error('detect frame failed', err); }
+  }
+  setTimeout(detectLoop, 150);
+}
+
+// Object detection runs on a slower cadence than face detection (it's a
+// heavier model) and only while ENGAGED — no point spending CPU looking for
+// objects when nobody's there to be showing them, which matters on the
+// no-GPU, 4-core target hardware.
+async function detectObjectsLoop() {
+  // Also runs during an active goal (see below) even if engagement lapses —
+  // a person watching the lamp search doesn't always have to be facing the
+  // camera dead-on for the search itself to keep working.
+  if (objectModel && (engaged || sequenceActive) && video.readyState >= 2 && video.videoWidth > 0) {
+    try {
+      const detections = await objectModel.detect(video);
+      const now = performance.now();
+      latestObjects = detections.filter((d) => d.score > 0.55 && d.class !== 'person');
+      for (const det of latestObjects) {
+        const [x, y, w, h] = det.bbox;
+        det.colorName = nameColor(sampleAverageColor(x, y, w, h));
+        rememberObject(det, det.colorName, now);
+      }
+      drawOverlay();
+    } catch (err) { console.error('object detect failed', err); }
+  } else if (!engaged && !sequenceActive && latestObjects.length) {
+    latestObjects = [];
+    drawOverlay();
+  }
+  setTimeout(detectObjectsLoop, 700);
+}
+
+initCamera().then(() => Promise.all([initModel(), initObjectModel()])).then(() => {
+  detectLoop();
+  detectObjectsLoop();
+});
+
+// ---------------------------------------------------------------------------
+// Generic action-sequence engine: a plain queue of typed steps —
+// {type, params..., duration, onStart?, checkDone?} — consumed one at a
+// time by updateActionSequence() every animation frame. Both the greeting
+// choreography (below) and goal-directed search (further below) build a
+// queue of these and hand it to startSequence(); this engine has no idea
+// which one it's running. That's the explicit language/action boundary:
+// whatever decides WHAT to do (greeting logic, or handleGoalCommand's
+// language + memory) builds the queue; this engine only knows HOW to run
+// whatever queue it's handed.
+//
+// Step types: 'pose' (set explicit joint/light targets), 'look' (aim at a
+// normalized image point), 'scan' (sweep while re-checking vision), 'wait'
+// (hold whatever's already set — used for timing beats and side effects).
+//
+// Honest limitation of this browser prototype: the webcam is fixed to the
+// laptop bezel and does not physically move with the simulated lamp head,
+// unlike the real head-mounted camera_link in the URDF. A "scan" is a
+// genuine characterful search animation, but the vision re-detection
+// underneath it is re-sampling the same fixed webcam frame, not an
+// actually different viewing angle. On real hardware with a head-mounted
+// camera, the scan would also change what the camera actually sees.
+// ---------------------------------------------------------------------------
+let sequenceActive = false;
+let actionQueue = [];
+let currentAction = null;
+let actionElapsed = 0;
+
+function startSequence(actions) {
+  actionQueue = actions;
+  currentAction = null;
+  sequenceActive = true;
+}
+
+function updateActionSequence(dt) {
+  if (!currentAction) {
+    currentAction = actionQueue.shift() || null;
+    actionElapsed = 0;
+    if (!currentAction) { sequenceActive = false; return; }
+    if (currentAction.onStart) currentAction.onStart();
+  }
+  actionElapsed += dt;
+
+  // Default "searching" lean for any step that doesn't specify a shoulder
+  // pose explicitly. This has to live here (checked against the freshly-
+  // fetched currentAction), not in the animate() caller — checking it
+  // there races against the one frame where a just-finished step has
+  // already cleared currentAction to null but the next step hasn't been
+  // fetched yet, which used to stick a stray 0.1 onto any subsequent
+  // 'wait' step that never re-asserts its own shoulder value.
+  if (currentAction.shoulder === undefined) {
+    shoulderSpring.target = 0.1;
+  }
+
+  if (currentAction.type === 'pose') {
+    if (currentAction.yaw !== undefined) baseYawSpring.target = currentAction.yaw;
+    if (currentAction.headPitch !== undefined) headPitchSpring.target = currentAction.headPitch;
+    if (currentAction.shoulder !== undefined) shoulderSpring.target = currentAction.shoulder;
+  } else if (currentAction.type === 'look') {
+    baseYawSpring.target = currentAction.yaw;
+    headPitchSpring.target = currentAction.pitch;
+  } else if (currentAction.type === 'scan') {
+    baseYawSpring.target = Math.sin(actionElapsed * 1.7) * 0.85;
+    headPitchSpring.target = -0.05 + Math.sin(actionElapsed * 2.3) * 0.15;
+  } else if (currentAction.type === 'elbowWag') {
+    // A smooth, decaying LEFT-RIGHT swing pivoting at the elbow — the
+    // middle joint — rather than the base. This is a cosmetic Z-axis
+    // rotation layered on top of that group's real pitch rotation; it has
+    // no corresponding URDF joint (elbow_pitch only pitches), it's purely
+    // a stylized wag flourish. It settles back to dead-center (0) as the
+    // amplitude decays, rather than ending askew. Optionally carries a
+    // simultaneous yaw/headPitch turn-to-face, so a single step can be one
+    // combined "notice + acknowledge" gesture instead of two sequential ones.
+    if (currentAction.yaw !== undefined) baseYawSpring.target = currentAction.yaw;
+    if (currentAction.headPitch !== undefined) headPitchSpring.target = currentAction.headPitch;
+    if (currentAction.shoulder !== undefined) shoulderSpring.target = currentAction.shoulder;
+    const decay = Math.exp(-actionElapsed * currentAction.decay);
+    currentAction.elbowYawWag = Math.sin(actionElapsed * currentAction.freq) * currentAction.amp * decay;
+  }
+  // 'wait' actions intentionally leave springs at whatever they last had
+  // (aside from the shoulder default above).
+
+  if (currentAction.light !== undefined) lightSpring.target = currentAction.light;
+
+  const done = (currentAction.checkDone && currentAction.checkDone()) || actionElapsed >= currentAction.duration;
+  if (done) {
+    if (currentAction.onDone) currentAction.onDone();
+    currentAction = null;
+  }
+}
+
+function playSuccessJingle() {
+  if (!soundEnabled) return;
+  guardMicFor(900);
+  const now = audioCtx.currentTime;
+  // Distinct from playGreetJingle()'s brighter sine "ta-da" — a small
+  // ascending triangle-wave arpeggio reads as "music" rather than a UI
+  // beep, giving the demo a separate, purposeful use of the music channel.
+  [523.25, 659.25, 783.99, 1046.5].forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.value = freq;
+    const t0 = now + i * 0.11;
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.2, t0 + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.3);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + 0.32);
+  });
+}
+
+// Language + memory decide WHAT to do (the queue); updateGoalAction() above
+// just runs it. The middle "scan" step is the required re-observation: it
+// actively re-checks live detections rather than trusting stale memory.
+function handleGoalCommand(rawName) {
+  const key = resolveObjectName(rawName);
+  const mem = sceneMemory.get(key);
+  const actions = [];
+
+  actions.push({ type: 'wait', duration: 0.55, onStart: () => speak(`Let me look for the ${rawName}.`) });
+
+  if (mem) {
+    actions.push({
+      type: 'look',
+      yaw: THREE.MathUtils.clamp((mem.nx - 0.5) * 1.8, -1.1, 1.1),
+      pitch: THREE.MathUtils.clamp((mem.ny - 0.5) * 1.0 - 0.05, -0.8, 0.6),
+      duration: 1.0,
+    });
+  }
+
+  let found = false;
+  actions.push({
+    type: 'scan',
+    duration: 3.5,
+    onStart: () => { found = false; },
+    checkDone: () => {
+      if (latestObjects.some((o) => o.class === key)) { found = true; return true; }
+      return false;
+    },
+  });
+
+  actions.push({
+    type: 'wait',
+    duration: 0.6,
+    onStart: () => {
+      const stillThere = found || (sceneMemory.has(key) && performance.now() - sceneMemory.get(key).lastSeenAt < 1500);
+      if (stillThere) {
+        triggerLightPulse();
+        playSuccessJingle();
+        speak(`Found the ${key}!`);
+      } else {
+        speak(`I don't see a ${rawName} right now.`);
+      }
+    },
+  });
+
+  startSequence(actions);
+}
+
+// ---------------------------------------------------------------------------
+// Engagement state machine
+// ---------------------------------------------------------------------------
+let engaged = false;
+let lastSeenAt = -Infinity;
+const DISENGAGE_HOLD_MS = 900; // grace period so a momentary detection drop doesn't flicker
+
+// One deliberate acknowledgment, not a chain of separate tics: a single
+// combined gesture — turn-to-face + elbow wag together, not sequential —
+// with the light rising and the jingle hitting in the same instant the
+// gesture starts (the sound *is* the impact, not a preamble to it), then
+// one settle beat before the spoken line. Exactly one motion, one light
+// beat, one music cue, one voice line.
+function buildGreetingSequence() {
+  const targetYaw = latestPrimary ? THREE.MathUtils.clamp((latestPrimary.nx - 0.5) * 1.8, -1.1, 1.1) : 0;
+  const targetPitch = latestPrimary ? THREE.MathUtils.clamp((latestPrimary.ny - 0.5) * 1.0 - 0.05, -0.8, 0.6) : 0;
+  const uprightShoulder = 0.16;
+
+  return [
+    { type: 'elbowWag', duration: 1.1,
+      yaw: targetYaw, headPitch: targetPitch, shoulder: uprightShoulder, light: 1.0,
+      amp: 0.5, freq: 7, decay: 2.6,
+      onStart: playGreetJingle,
+    },
+    { type: 'wait', duration: 0.3, shoulder: uprightShoulder, light: 1.0,
+      onStart: () => { if (!speakGreeting()) startRecognizer(); } },
+  ];
+}
+
+function playGreetJingle() {
+  if (!soundEnabled) return;
+  guardMicFor(700);
+  const now = audioCtx.currentTime;
+  // Bright, punchy "ta-da" — sine wave, tight spacing, different notes from
+  // playSuccessJingle()'s mellower triangle arpeggio, so the greeting and a
+  // completed goal read as two distinct musical cues, not the same sting.
+  [784.0, 987.77, 1318.51].forEach((freq, i) => {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = freq;
+    const t0 = now + i * 0.07;
+    gain.gain.setValueAtTime(0.0001, t0);
+    gain.gain.exponentialRampToValueAtTime(0.25, t0 + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.22);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0 + 0.24);
+  });
+}
+
+function onEngage() {
+  wantListening = true;
+  camStateEl.textContent = 'ENGAGED';
+  camStateEl.style.color = '#baffd6';
+  startSequence(buildGreetingSequence());
+}
+function onDisengage() {
+  triggerSquash(0.45);
+  stopRecognizer();
+  camStateEl.textContent = 'IDLE';
+  camStateEl.style.color = '#d8ffe8';
+}
+
+let lastTime = performance.now();
+function animate() {
+  requestAnimationFrame(animate);
+  const now = performance.now();
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+
+  if (latestPrimary) lastSeenAt = now;
+  const shouldBeEngaged = (now - lastSeenAt) < DISENGAGE_HOLD_MS;
+  if (shouldBeEngaged && !engaged) { engaged = true; onEngage(); }
+  else if (!shouldBeEngaged && engaged) { engaged = false; onDisengage(); }
+
+  const t = now / 1000;
+  if (sequenceActive) {
+    // A running sequence (greeting or goal-search) owns the head/base
+    // joints outright — face-tracking and idle sway both stand down until
+    // the action queue drains.
+    updateActionSequence(dt);
+    elbowSpring.target = -0.30 - shoulderSpring.value * 0.4; // default pitch coupling
+  } else if (engaged && latestPrimary) {
+    baseYawSpring.target = THREE.MathUtils.clamp((latestPrimary.nx - 0.5) * 1.8, -1.1, 1.1);
+    headPitchSpring.target = THREE.MathUtils.clamp((latestPrimary.ny - 0.5) * 1.0 - 0.05, -0.8, 0.6);
+    shoulderSpring.target = 0.16;
+    elbowSpring.target = -0.30 - shoulderSpring.value * 0.4;
+  } else {
+    // Idle/disengaged: not a gentle sway — a genuinely drooped, "asleep"
+    // posture (shoulder and elbow curled toward their limits, head hung
+    // down), with only a faint breathing-scale sway so it doesn't look
+    // frozen/broken. The wake beat of the greeting sequence is what
+    // straightens this back out.
+    baseYawSpring.target = Math.sin(t * 0.15) * 0.06;
+    headPitchSpring.target = 0.68 + Math.sin(t * 0.18 + 1.0) * 0.02;
+    shoulderSpring.target = 1.05;
+    elbowSpring.target = -1.6 + Math.sin(t * 0.16 + 2.0) * 0.02;
+  }
+  neckYawSpring.target = baseYawSpring.value * 0.3;
+
+  // Defensive clamp, applied at the single point where every upstream
+  // source (face tracking, greeting choreography, goal action queue, idle
+  // pose) has already written a target: cap it to the URDF's own
+  // <safety_controller soft_lower_limit/soft_upper_limit> values, not the
+  // wider hard <limit>. Standard ROS/URDF practice — soft limits exist to
+  // leave mechanical margin before the hard stop, so a live position
+  // controller should never intentionally command a joint to its absolute
+  // hard limit. (The idle "asleep" pose above targets the shoulder at 1.05
+  // rad, which IS the hard limit — this clamp is what actually keeps the
+  // commanded target at the URDF's soft ceiling of 0.95 rad instead.)
+  baseYawSpring.target   = THREE.MathUtils.clamp(baseYawSpring.target,   -2.450, 2.450);
+  shoulderSpring.target  = THREE.MathUtils.clamp(shoulderSpring.target,  -0.650, 0.950);
+  elbowSpring.target     = THREE.MathUtils.clamp(elbowSpring.target,     -1.700, 0.300);
+  neckYawSpring.target   = THREE.MathUtils.clamp(neckYawSpring.target,   -1.250, 1.250);
+  headPitchSpring.target = THREE.MathUtils.clamp(headPitchSpring.target, -0.800, 0.600);
+
+  for (const s of [baseYawSpring, headPitchSpring, neckYawSpring, shoulderSpring, elbowSpring]) s.update(dt);
+
+  baseYaw.rotation.z = baseYawSpring.value;
+  headPitch.rotation.y = headPitchSpring.value;
+  neckYaw.rotation.z = neckYawSpring.value;
+  shoulderPitch.rotation.y = shoulderSpring.value;
+  elbowPitch.rotation.y = elbowSpring.value;
+  elbowPitch.rotation.z = (sequenceActive && currentAction && currentAction.elbowYawWag !== undefined)
+    ? currentAction.elbowYawWag : 0;
+
+  // Squash & stretch pulse on the lamp head at the moment of arrival/reaction.
+  if (squashElapsed < 0.6) {
+    squashElapsed += dt;
+    const k = Math.exp(-squashElapsed * 7) * Math.sin(squashElapsed * 26) * squashMag;
+    lampHead.scale.set(1 + k * 0.4, 1 - k * 0.7, 1 + k * 0.4);
+  } else {
+    lampHead.scale.set(1, 1, 1);
+  }
+
+  // Light: a running sequence's own steps set explicit light beats (the
+  // greeting's wake-then-wag fade-on); otherwise it's the plain attentive
+  // glow when engaged, or nearly off — asleep — when idle, plus a quick
+  // double-pulse ("blink") layered on top for other one-off triggers.
+  if (sequenceActive && currentAction && currentAction.light !== undefined) {
+    lightSpring.target = currentAction.light;
+  } else {
+    lightSpring.target = engaged ? 0.8 : 0.04;
+  }
+  lightSpring.update(dt);
+  if (soundEnabled) {
+    lampHum.volume = THREE.MathUtils.clamp(lightSpring.value, 0, 1) * LAMP_HUM_MAX_VOLUME;
+  }
+  const pt = (now - pulseStart) / 1000;
+  const pulse = pt >= 0 && pt < 0.5 ? Math.exp(-pt * 6) * Math.abs(Math.sin(pt * 34)) * 0.6 : 0;
+
+  // Voice visualizer: each word-boundary impulse decays fast on its own, so
+  // consecutive words overlap into a lively flicker instead of one smooth
+  // glow, and it falls silent within VOICE_PULSE_WINDOW of the last word.
+  const vt = (now - voicePulseStart) / 1000;
+  const voicePulse = vt >= 0 && vt < VOICE_PULSE_WINDOW
+    ? Math.exp(-vt * VOICE_PULSE_DECAY) * voicePulseMag
+    : 0;
+
+  const intensity = THREE.MathUtils.clamp(lightSpring.value + pulse + voicePulse, 0, 1.5);
+  matLight.emissiveIntensity = intensity;
+  lampBulb.intensity = 0.2 + intensity * 0.9;
+
+  // Visual mapping: louder/closer word peaks also push the light's color
+  // from its resting warm cream toward a brighter white, on top of the
+  // intensity bump — so speech reads as a color+brightness flicker, not
+  // just a brightness one. voicePulseMag's clamped range (0.35-0.75) maps
+  // to a modest 0-0.55 color-mix so it never fully bleaches to white.
+  const colorMix = THREE.MathUtils.clamp((voicePulse / 0.75) * 0.7, 0, 0.55);
+  scratchColor.copy(voiceColorCool).lerp(voiceColorHot, colorMix);
+  matLight.color.copy(scratchColor);
+  matLight.emissive.copy(scratchColor);
+  lampBulb.color.copy(scratchColor);
+
+  // "Zzz" sleep indicator: only while genuinely idle/asleep (not mid-
+  // sequence, e.g. the greeting's wake beat or a goal search), floating
+  // above wherever the head currently is in screen space.
+  const asleep = !engaged && !sequenceActive;
+  zzzEl.style.opacity = asleep ? '1' : '0';
+  if (asleep) {
+    headGimbal.getWorldPosition(zzzWorldPos);
+    zzzWorldPos.z += 0.09;
+    zzzWorldPos.project(camera);
+    zzzEl.style.left = `${(zzzWorldPos.x * 0.5 + 0.5) * window.innerWidth}px`;
+    zzzEl.style.top = `${(-zzzWorldPos.y * 0.5 + 0.5) * window.innerHeight}px`;
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
