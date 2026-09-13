@@ -225,13 +225,24 @@ window.addEventListener('resize', () => {
 // action (the arm and neck lag a beat behind the head's primary motion).
 // ---------------------------------------------------------------------------
 class Spring {
-  constructor(stiffness, damping, value = 0) {
+  // maxVel mirrors the URDF's <limit velocity="..."> for this joint (rad/s).
+  // Measured directly (see TECHNICAL_NOTE.md §Physical reasoning): the
+  // shoulder and elbow springs, tuned only by eye for how the motion should
+  // *look*, actually swing past their real joint's rated speed during the
+  // greeting gesture (shoulder hit 1.11 rad/s against a 0.95 limit; elbow
+  // hit 1.54 against 1.15) — a real servo would either fault or slew-limit
+  // rather than track that command. Clamping vel every step is what makes
+  // the animation obey the joint's physical speed rating regardless of how
+  // aggressively upstream code sets a target.
+  constructor(stiffness, damping, value = 0, maxVel = Infinity) {
     this.stiffness = stiffness; this.damping = damping;
     this.value = value; this.vel = 0; this.target = value;
+    this.maxVel = maxVel;
   }
   update(dt) {
     const acc = this.stiffness * (this.target - this.value) - this.damping * this.vel;
     this.vel += acc * dt;
+    this.vel = Math.max(-this.maxVel, Math.min(this.maxVel, this.vel));
     this.value += this.vel * dt;
   }
 }
@@ -240,11 +251,11 @@ class Spring {
 // character (damping ratio ~0.42-0.6 across the chain), but roughly half
 // the natural frequency, so the whole assembly reads as weighty/floaty
 // rather than snappy. Pixar timing favors fewer, slower, bigger moves.
-const baseYawSpring     = new Spring(16, 3.4);    // primary orientation
-const headPitchSpring   = new Spring(14, 3.1);    // primary look
-const neckYawSpring     = new Spring(9, 3.0);     // secondary — trails the base, adds head "tilt" flair
-const shoulderSpring    = new Spring(8, 3.1);     // lean-in posture — slower, follows after
-const elbowSpring       = new Spring(7, 3.2, -0.30); // rest curl — slowest, follow-through tail
+const baseYawSpring     = new Spring(16, 3.4, 0, 1.50);      // primary orientation
+const headPitchSpring   = new Spring(14, 3.1, 0, 1.45);      // primary look
+const neckYawSpring     = new Spring(9, 3.0, 0, 1.60);       // secondary — trails the base, adds head "tilt" flair
+const shoulderSpring    = new Spring(8, 3.1, 0, 0.95);       // lean-in posture — slower, follows after
+const elbowSpring       = new Spring(7, 3.2, -0.30, 1.15);   // rest curl — slowest, follow-through tail
 
 let squashElapsed = Infinity;   // Infinity = inactive
 let squashMag = 0;

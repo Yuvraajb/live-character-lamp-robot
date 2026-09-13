@@ -66,23 +66,25 @@ geometry) is reproduced 1:1 as a three.js `Group` hierarchy
 (index.html:227–247) instead of torque dynamics — believable motion, not
 contact simulation, with Pixar-style overshoot/follow-through "for free."
 Every spring target is clamped every frame (index.html:1048–1062) to the
-URDF's own `<safety_controller>` **soft** limits, not the wider hard
-`<limit>` (standard ROS practice, margin before a hard stop) — the idle
+URDF's own `<safety_controller>` **soft position** limits, not the wider
+hard `<limit>` (standard ROS practice, margin before a hard stop) — the idle
 "asleep" pose targets the shoulder's *hard* limit, 1.05 rad, and is visibly
-capped by this clamp to the 0.95 rad soft limit instead. **Deployment:** a
-static page with zero server-side state deploys anywhere serving HTTPS
-(camera/mic need a secure origin) — shipped to Vercel here.
+capped by this clamp to the 0.95 rad soft limit instead. Springs are also
+clamped to the URDF's `<limit velocity="...">` (index.html:227–238) — not a
+defensive guess but a measured fix; see §4. **Deployment:** a static page
+with zero server-side state deploys anywhere serving HTTPS (camera/mic need
+a secure origin) — shipped to Vercel here.
 
 ## 3. Target environment (Ubuntu 24.04, 4 core, 8 GB, no GPU)
 
 No model runs server-side or needs CUDA — both run in-browser via
-TensorFlow.js (WebGL, falls back to WASM/CPU). Two caveats, both in
-README.md: (1) **speech input needs real Google Chrome**, not stock
-Chromium — `SpeechRecognition` requires an embedded Google API key apt's
-`chromium-browser` doesn't ship; (2) **`speechSynthesis` can enumerate zero
-voices on a bare image** — Ubuntu doesn't install a speech stack by default.
-The app detects this (`announceIfNoVoices`) and falls back to captions
-instead of failing silently; `sudo apt install espeak-ng` restores audio.
+TensorFlow.js (WebGL, falls back to WASM/CPU). Two caveats, both handled in
+code and documented in README.md: (1) **speech input needs real Google
+Chrome**, not stock Chromium, since `SpeechRecognition` needs an embedded
+Google API key apt's `chromium-browser` lacks; (2) a bare Ubuntu image ships
+**zero `speechSynthesis` voices** — the app detects this (`announceIfNoVoices`)
+and falls back to captions instead of failing silently; `apt install
+espeak-ng` restores audio.
 
 ## 4. Measurements
 
@@ -101,6 +103,7 @@ mechanically; an on-target rerun is the honest next step.
 | Renderer CPU, steady engaged state | ~23% + ~17% of one core (two processes), `ps` sampled over 10s |
 | Detection cadences (by design) | face 6.6 Hz / objects 1.4 Hz while engaged (index.html:751,778) |
 | Disengage grace period | 900 ms hold, avoids flicker on a momentary detection drop |
+| Peak joint velocity, greeting gesture | shoulder 1.11, elbow 1.54 rad/s measured **before** the fix in §2 — both over their URDF rating (0.95, 1.15); now clamped to exactly the rating |
 
 **Engagement reliability:** the numbers above are the design parameters and
 BlazeFace's published frontal-face performance — I did not run a
@@ -111,16 +114,15 @@ hidden.
 
 ## 5. Known limitations
 
-- **Facing heuristic is head-pose, not gaze** — upgradeable to MediaPipe
-  FaceMesh with iris refinement; skipped to keep the perception budget small
-  on a 4-core CPU target.
-- **Webcam is fixed to the laptop bezel**, unlike the URDF's head-mounted
-  `camera_link` — a "scan" is a real search animation, but the vision under
-  it re-samples the same fixed frame, not an actually different angle.
+- **Facing heuristic is head-pose, not gaze** (upgradeable to MediaPipe
+  FaceMesh + iris, skipped to keep the CPU budget small), **and the webcam
+  is fixed to the bezel**, unlike the URDF's head-mounted `camera_link` — a
+  "scan" is a real search animation, but the vision under it re-samples the
+  same fixed frame, not an actually different angle.
 - **Goal parsing is regex over ~20 COCO classes plus synonyms**, not open
-  vocabulary (§2 explains why, and the upgrade path).
-- **Chrome-only** for voice — Firefox/Safari silently skip `SpeechRecognition`;
-  everything else still works.
-- **Elbow "wag" flourish is cosmetic** (a Z-rotation, no matching URDF
-  joint); **color naming** is a coarse 8-bucket HSL classifier — good enough
-  for "the red mug," not colorimetric. Both disclosed, not hidden.
+  vocabulary (§2 explains why, and the upgrade path). **Chrome-only** for
+  voice — Firefox/Safari silently skip `SpeechRecognition`; everything else
+  still works.
+- **Elbow "wag" is a cosmetic Z-rotation** with no matching URDF joint, and
+  **color naming** is a coarse 8-bucket HSL classifier, good for "the red
+  mug" but not colorimetric. Both disclosed, not hidden.
